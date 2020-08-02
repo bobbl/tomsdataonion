@@ -6,7 +6,7 @@
 
 
 /* read from stdin */
-unsigned input(unsigned char *dest)
+unsigned int input(unsigned char *dest)
 {
     unsigned int d = 0;
     unsigned int ch = 0;
@@ -31,7 +31,7 @@ void output(unsigned char *src, unsigned int len)
 
 
 /* layer 0: decode Adobe flavoured ASCIIZ85 */
-int asciiz85(unsigned char *dest, unsigned char *src, unsigned int slen)
+unsigned int asciiz85(unsigned char *dest, unsigned char *src, unsigned int slen)
 {
     unsigned int s = 0;
     unsigned int d = 0;
@@ -79,7 +79,7 @@ int asciiz85(unsigned char *dest, unsigned char *src, unsigned int slen)
         if (ch >= 33) {
             if (ch <= 117) {
                 w = (w * 85) + (ch-33);
-                pos++;
+                pos = pos + 1;
                 if (pos >= 5) {
                     dest[d    ] = w >> 24;
                     dest[d + 1] = w >> 16;
@@ -97,7 +97,7 @@ int asciiz85(unsigned char *dest, unsigned char *src, unsigned int slen)
 
 
 /* layer 1: bitwise operations */
-int bitfilter(unsigned char *dest, unsigned char *src, int slen)
+unsigned int bitfilter(unsigned char *dest, unsigned char *src, unsigned int slen)
 {
     unsigned int s = 0;
     while (s < slen) {
@@ -110,7 +110,7 @@ int bitfilter(unsigned char *dest, unsigned char *src, int slen)
 
 
 /* layer 2: parity bit */
-int parity(unsigned char *dest, unsigned char *src, int slen)
+unsigned int parity(unsigned char *dest, unsigned char *src, unsigned int slen)
 {
     unsigned int bits = 0;
     unsigned int count = 0;
@@ -138,13 +138,13 @@ int parity(unsigned char *dest, unsigned char *src, int slen)
 
 
 /* layer 3: xor encryption */
-int xorenc(unsigned char *dest, unsigned char *src, unsigned int slen)
+unsigned int xorenc(unsigned char *dest, unsigned char *src, unsigned int slen)
 {
     char *plain = "==[ Layer 4/6: =============\x0a\x0a ]";
         /*         11111111111111122222222222222222222211 
            char from first or second block */
     unsigned char key[32];
-    unsigned i = 0;
+    unsigned int i = 0;
     while (i < 15) {
         key[i] = src[i] ^ plain[i];
         i = i + 1;
@@ -160,96 +160,97 @@ int xorenc(unsigned char *dest, unsigned char *src, unsigned int slen)
 
     i = 0;
     while (i < slen) {
-        dest[i] = src[i] ^ key[(i << 27) >> 27]; /* i & 31 */
+        dest[i] = src[i] ^ key[(i << 27) >> 27];
         i = i + 1;
     }
     return slen;
 }
 
 
+unsigned int get_uint16be(unsigned char *p)
+{
+    return (p[0] << 8) + p[1];
+}
+
+
 /* layer 4: UDP/IP */
-int udpip(unsigned char *dest, unsigned char *src, unsigned int slen)
+unsigned int udpip(unsigned char *dest, unsigned char *src, unsigned int slen)
 {
     unsigned int s = 0;
     unsigned int d = 0;
     while (s < slen) {
         if ((src[s] >> 4) != 4) return d;
 
-        unsigned int total_length = (src[s+2] << 8) + src[s+3];
+        unsigned int total_length = get_uint16be(src + s + 2);
         unsigned int ip_header_len = (src[s] << 28) >> 26;
 
-        // IP checksum
-        unsigned int j;
         unsigned int ip_checksum = 0;
-        for (j=0; j<ip_header_len; j=j+2) {
-            ip_checksum = ip_checksum + 
-                (((src[s+j] & 255) << 8) | (src[s+j+1] & 255));
+        unsigned int j = 0;
+        while (j < ip_header_len) {
+            ip_checksum = ip_checksum + get_uint16be(src + s + j);
+            j = j + 2;
         }
-        ip_checksum = (ip_checksum & 0xFFFF) + ((ip_checksum >> 16) & 0xFFFF);
-        if (ip_checksum > 0xFFFF) ip_checksum = (ip_checksum & 0xFFFF) + 1;
+        ip_checksum = ((ip_checksum << 16) >> 16) + (ip_checksum >> 16);
+        ip_checksum = ((ip_checksum << 16) >> 16) + (ip_checksum >> 16);
 
-        unsigned udp_len = ((src[s+ip_header_len+4] & 255) << 8) |
-            (src[s+ip_header_len+5] & 255);
-
-        // UDP checksum
-        unsigned udp_checksum;
-        if ((src[s+ip_header_len+6]==0) && (src[s+ip_header_len+7]==0)) {
+        unsigned int udp_len      = get_uint16be(src + s + ip_header_len + 4);
+        unsigned int udp_checksum = get_uint16be(src + s + ip_header_len + 6);
+        if (udp_checksum == 0) {
             udp_checksum = 0xFFFF; // no checksum -> always correct
         }
         else {
             // pseudo header
             udp_checksum = udp_len + 17;
-            for (j=0; j<8; j=j+2) { // source and dest IP from IP header
-                udp_checksum = udp_checksum +
-                    (((src[s+12+j] & 255) << 8) | (src[s+12+j+1] & 255));
+            j = 0;
+            while (j < 8) { // source and dest IP from IP header
+                udp_checksum = udp_checksum + get_uint16be(src + s + 12 + j);
+                j = j + 2;
             }
-            for (j=0; j<udp_len-1; j=j+2) { // UDP package
-                udp_checksum = udp_checksum +
-                    (((src[s+ip_header_len+j] & 255) << 8) |
-                      (src[s+ip_header_len+j+1] & 255));
+            j = 0;
+            while (j < udp_len - 1) { // UDP package
+                udp_checksum = udp_checksum + 
+                    get_uint16be(src + s + ip_header_len + j);
+                j = j + 2;
             }
             if (j != udp_len) { // odd UDP length => pad 0
                 udp_checksum = udp_checksum +
-                    ((src[s+ip_header_len+udp_len-1] & 255) << 8);
+                    (src[s + ip_header_len + udp_len - 1] << 8);
             }
-            if (udp_checksum > 0xFFFF) 
-                udp_checksum = (udp_checksum & 0xFFFF) +
-                    ((udp_checksum >> 16) & 0xFFFF);
+            udp_checksum = ((udp_checksum << 16) >> 16) + (udp_checksum >> 16);
+            udp_checksum = ((udp_checksum << 16) >> 16) + (udp_checksum >> 16);
         }
 
-        if ((src[s+9]==17) && // UDP protocol
-
-            (src[s+12]==10) && // source ip
-            (src[s+13]==1) &&
-            (src[s+14]==1) &&
-            (src[s+15]==10) &&
-
-            (src[s+16]==10) && // dest ip
-            (src[s+17]==1) &&
-            (src[s+18]==1) &&
-            ((src[s+19] & 255) == 200) &&
-
-            ((src[s+ip_header_len+2] & 255) == 164) &&  // des port 42069
-            (src[s+ip_header_len+3]==85) &&
-
-            (ip_checksum==0xFFFF) &&
-            (udp_checksum==0xFFFF))
+        // avoid &&
+        if (src[s+9] == 17) // UDP protocol
+        if (src[s+12] == 10) // source ip
+        if (src[s+13] == 1)
+        if (src[s+14] == 1)
+        if (src[s+15] == 10)
+        if (src[s+16] == 10) // dest ip
+        if (src[s+17] == 1)
+        if (src[s+18] == 1)
+        if (src[s+19] == 200)
+        if (src[s + ip_header_len + 2] == 164) // dest port 42069
+        if (src[s+ip_header_len+3] == 85)
+        if (ip_checksum == 0xFFFF)
+        if (udp_checksum == 0xFFFF)
         {
-            for (j=8; j<udp_len; j++) {
-                dest[d] = src[s+ip_header_len+j];
+            j = 8;
+            while (j < udp_len) {
+                dest[d] = src[s + ip_header_len + j];
                 d = d + 1;
+                j = j + 1;
             }
         }
-
         s = s + total_length;
     }
     return d;
 }
 
 
-unsigned xtime(unsigned x)
+unsigned int xtime(unsigned int x)
 {
-    unsigned int r = (x << 25) >> 24; /* (x << 1) & 255 */
+    unsigned int r = (x << 25) >> 24;
     if (x > 127) r = 27 ^ r;
     return r;
 }
@@ -266,7 +267,7 @@ unsigned  mulinv(unsigned x)
             r = 1;
             x = 0; /* avoid that the condition a==x is true once again */
         }
-        unsigned int r2 = (r << 25) >> 24; /* (r << 1) & 255 */
+        unsigned int r2 = (r << 25) >> 24;
         if (r > 127) r = r ^ r2 ^ 27;
         else r = r ^ r2;
         i = i + 1;
@@ -297,25 +298,52 @@ unsigned invsbox(unsigned x)
 }
 
 
-void aes_encrypt_block(uint8_t *ciphertext,
-                         const uint8_t *key,
-                         const uint8_t *plaintext)
-{
-    uint8_t buf[16];
-    uint8_t enckey[32]; 
-    uint8_t i, j, rcon;
-    uint8_t a, b, c, d;
 
-    i = 16;
-    while (i--)
-    {
-	buf[i] = plaintext[i] ^ (enckey[i] = key[i]);
-	enckey[16+i] = key[16 + i];
+void iter_lower_key(unsigned char *key, unsigned int rcon)
+{
+    key[0] ^= sbox(key[29]) ^ rcon;
+    key[1] ^= sbox(key[30]);
+    key[2] ^= sbox(key[31]);
+    key[3] ^= sbox(key[28]);
+    unsigned int i = 4;
+    while (i < 16) {
+        key[i] = key[i] ^ key[i-4];
+        i = i + 1;
     }
-    
-    rcon = 1;
-    for(j=1; j<14; j++)
-    {
+}
+
+void iter_upper_key(unsigned char *key)
+{
+    key[16] = key[16] ^ sbox(key[12]);
+    key[17] = key[17] ^ sbox(key[13]);
+    key[18] = key[18] ^ sbox(key[14]);
+    key[19] = key[19] ^ sbox(key[15]);
+    unsigned int i = 20;
+    while (i < 32) { 
+        key[i] = key[i] ^ key[i-4];
+        i = i + 1;
+    }
+}
+
+void aes_encrypt_block(unsigned char *ciphertext,
+                       unsigned char *key,
+                       unsigned char *plaintext)
+{
+    unsigned char buf[16];
+    unsigned char enckey[32]; 
+
+    unsigned int i = 0;
+    while (i < 16) {
+        enckey[i]      = key[i];
+        buf[i]         = plaintext[i] ^ enckey[i];
+        enckey[i + 16] = key[i + 16];
+        i = i + 1;
+    }
+
+    unsigned int rcon = 1;
+    unsigned int upper = 0;
+    unsigned int j = 1;
+    while (j < 14) {
 	buf[0] = sbox(buf[0]);
 	buf[4] = sbox(buf[4]);
 	buf[8] = sbox(buf[8]);
@@ -329,90 +357,73 @@ void aes_encrypt_block(uint8_t *ciphertext,
 			        buf[15] = sbox(buf[11]);
 			        buf[11] = sbox(buf[7]);	buf[7] = i;
 
-        for (i=0; i<16; i+=4)
-	{
-    	    a = buf[i]; 
-    	    b = buf[i+1]; 
-    	    c = buf[i+2];
-    	    d = buf[i+3];
-	    buf[i]   = b ^ c ^ d ^ xtime(a^b);
-	    buf[i+1] = a ^ c ^ d ^ xtime(b^c);
-    	    buf[i+2] = a ^ b ^ d ^ xtime(c^d);
-    	    buf[i+3] = a ^ b ^ c ^ xtime(d^a);
-	}
+        i = 0;
+        while (i < 16) {
+            unsigned int a = buf[i]; 
+            unsigned int b = buf[i+1]; 
+            unsigned int c = buf[i+2];
+            unsigned int d = buf[i+3];
+            buf[i]   = b ^ c ^ d ^ xtime(a^b);
+            buf[i+1] = a ^ c ^ d ^ xtime(b^c);
+            buf[i+2] = a ^ b ^ d ^ xtime(c^d);
+            buf[i+3] = a ^ b ^ c ^ xtime(d^a);
+            i = i + 4;
+        }
 
-        if (j&1) 
-        {
-	    i = 16;
-	    while (i--) buf[i] ^= enckey[i+16];
-    	}
-        else 
-        {
-	    buf[0] ^= (enckey[0] ^= sbox(enckey[29]) ^ rcon);
-	    buf[1] ^= (enckey[1] ^= sbox(enckey[30]));
-	    buf[2] ^= (enckey[2] ^= sbox(enckey[31]));
-	    buf[3] ^= (enckey[3] ^= sbox(enckey[28]));
-	    for(i=4; i<16; i++)
-		buf[i] ^= (enckey[i] ^= enckey[i-4]);
+        if (upper) {
+            upper = 0;
+            iter_lower_key(enckey, rcon);
+            iter_upper_key(enckey);
+            rcon = xtime(rcon);
+        } else upper = 16;
 
-	    enckey[16] ^= sbox(enckey[12]);
-	    enckey[17] ^= sbox(enckey[13]);
-	    enckey[18] ^= sbox(enckey[14]);
-	    enckey[19] ^= sbox(enckey[15]);
-	    for(i=20; i<32; i++) 
-		enckey[i] ^= enckey[i-4];
-	
-	    rcon = (rcon<<1) ^ ((rcon&0x80) ? 0x1b : 0);
-    	}
+        i = 0;
+        while (i < 16) {
+            buf[i] = buf[i] ^ enckey[i + upper];
+            i = i + 1;
+        }
+        j = j + 1;
     }
 
-    ciphertext[ 0] = (sbox(buf[ 0]) ^ (enckey[ 0] ^= sbox(enckey[29]) ^ rcon));
-    ciphertext[ 1] = (sbox(buf[ 5]) ^ (enckey[ 1] ^= sbox(enckey[30])));
-    ciphertext[ 2] = (sbox(buf[10]) ^ (enckey[ 2] ^= sbox(enckey[31])));
-    ciphertext[ 3] = (sbox(buf[15]) ^ (enckey[ 3] ^= sbox(enckey[28])));
-    ciphertext[ 4] = (sbox(buf[ 4]) ^ (enckey[ 4] ^= enckey[ 0]));
-    ciphertext[ 5] = (sbox(buf[ 9]) ^ (enckey[ 5] ^= enckey[ 1]));
-    ciphertext[ 6] = (sbox(buf[14]) ^ (enckey[ 6] ^= enckey[ 2]));
-    ciphertext[ 7] = (sbox(buf[ 3]) ^ (enckey[ 7] ^= enckey[ 3]));
-    ciphertext[ 8] = (sbox(buf[ 8]) ^ (enckey[ 8] ^= enckey[ 4]));
-    ciphertext[ 9] = (sbox(buf[13]) ^ (enckey[ 9] ^= enckey[ 5]));
-    ciphertext[10] = (sbox(buf[ 2]) ^ (enckey[10] ^= enckey[ 6]));
-    ciphertext[11] = (sbox(buf[ 7]) ^ (enckey[11] ^= enckey[ 7]));
-    ciphertext[12] = (sbox(buf[12]) ^ (enckey[12] ^= enckey[ 8]));
-    ciphertext[13] = (sbox(buf[ 1]) ^ (enckey[13] ^= enckey[ 9]));
-    ciphertext[14] = (sbox(buf[ 6]) ^ (enckey[14] ^= enckey[10]));
-    ciphertext[15] = (sbox(buf[11]) ^ (enckey[15] ^= enckey[11]));
+    iter_lower_key(enckey, rcon);
+    ciphertext[ 0] = sbox(buf[ 0]) ^ enckey[ 0];
+    ciphertext[ 1] = sbox(buf[ 5]) ^ enckey[ 1];
+    ciphertext[ 2] = sbox(buf[10]) ^ enckey[ 2];
+    ciphertext[ 3] = sbox(buf[15]) ^ enckey[ 3];
+    ciphertext[ 4] = sbox(buf[ 4]) ^ enckey[ 4];
+    ciphertext[ 5] = sbox(buf[ 9]) ^ enckey[ 5];
+    ciphertext[ 6] = sbox(buf[14]) ^ enckey[ 6];
+    ciphertext[ 7] = sbox(buf[ 3]) ^ enckey[ 7];
+    ciphertext[ 8] = sbox(buf[ 8]) ^ enckey[ 8];
+    ciphertext[ 9] = sbox(buf[13]) ^ enckey[ 9];
+    ciphertext[10] = sbox(buf[ 2]) ^ enckey[10];
+    ciphertext[11] = sbox(buf[ 7]) ^ enckey[11];
+    ciphertext[12] = sbox(buf[12]) ^ enckey[12];
+    ciphertext[13] = sbox(buf[ 1]) ^ enckey[13];
+    ciphertext[14] = sbox(buf[ 6]) ^ enckey[14];
+    ciphertext[15] = sbox(buf[11]) ^ enckey[15];
 }
 
 
-void aes_decrypt_block(uint8_t *plaintext,
-                       const uint8_t *key,
-                       const uint8_t *ciphertext)
+void aes_decrypt_block(unsigned char *plaintext,
+                       unsigned char *key,
+                       unsigned char *ciphertext)
 {
-    uint8_t buf[16];
-    uint8_t deckey[32];
+    unsigned char buf[16];
+    unsigned char deckey[32];
 
-    uint8_t rcon;
-    uint8_t i, j;
-    uint8_t a, b, c, d, e, x, y, z;
-
-    for (i = 0; i < 32; i++) deckey[i] = key[i];
-    rcon = 1;
-    for (j = 8;--j;) 
-    {
-        deckey[0] ^= sbox(deckey[29]) ^ rcon;
-	deckey[1] ^= sbox(deckey[30]);
-        deckey[2] ^= sbox(deckey[31]);
-	deckey[3] ^= sbox(deckey[28]);
-        for(i=4; i<16; i++) deckey[i] ^= deckey[i-4];
-
-	deckey[16] ^= sbox(deckey[12]);
-        deckey[17] ^= sbox(deckey[13]);
-        deckey[18] ^= sbox(deckey[14]);
-	deckey[19] ^= sbox(deckey[15]);
-        for(i=20; i<32; i++) deckey[i] ^= deckey[i-4];
-	
-	rcon = (rcon<<1) ^ ((rcon&0x80) ? 0x1b : 0);
+    unsigned int i = 0;
+    while (i < 32) {
+        deckey[i] = key[i];
+        i = i + 1;
+    }
+    unsigned int rcon = 1;
+    unsigned int j = 0;
+    while (j < 7) {
+        iter_lower_key(deckey, rcon);
+        iter_upper_key(deckey);
+        rcon = xtime(rcon);
+        j = j + 1;
     }
 
     buf[ 0] = invsbox(ciphertext[ 0] ^ deckey[ 0]);
@@ -433,46 +444,62 @@ void aes_decrypt_block(uint8_t *plaintext,
     buf[15] = invsbox(ciphertext[ 3] ^ deckey[ 3]);
 
     rcon = 0x80;
-    for (j = 14; --j;)
-    {
-        if (j&1)           
-        {
-	    rcon = (rcon>>1) ^ ((rcon&1) ? 0x8d : 0);
+    unsigned int odd = 1;
+    j = 0;
+    while (j < 13) {
+        if (odd) {
+            odd = 0;
+            if ((rcon << 31) == 0) rcon = rcon >> 1;
+                              else rcon = (rcon >> 1) ^ 141;
+            i = 16;
+            while (i > 4) {
+                i = i - 1;
+                deckey[16+i] = deckey[16+i] ^ deckey[16+i-4];
+            }
+            deckey[16] = deckey[16] ^ sbox(deckey[12]);
+            deckey[17] = deckey[17] ^ sbox(deckey[13]);
+            deckey[18] = deckey[18] ^ sbox(deckey[14]);
+            deckey[19] = deckey[19] ^ sbox(deckey[15]);
 
-	    for (i=15; i>=4; i--)
-		buf[i] ^= (deckey[16+i] ^= deckey[16+i-4]);
-	    buf[0] ^= (deckey[16] ^= sbox(deckey[12]));
-	    buf[1] ^= (deckey[17] ^= sbox(deckey[13]));
-	    buf[2] ^= (deckey[18] ^= sbox(deckey[14]));
-	    buf[3] ^= (deckey[19] ^= sbox(deckey[15]));
+            i = 0;
+            while (i < 16) {
+                buf[i] = buf[i] ^ deckey[i + 16];
+                i = i + 1;
+            }
 
-	    for (i=15; i>=4; i--)
-		deckey[i] ^= deckey[i-4];
-	    deckey[0] ^= sbox(deckey[29]) ^ rcon;
-	    deckey[1] ^= sbox(deckey[30]);
-	    deckey[2] ^= sbox(deckey[31]);
-	    deckey[3] ^= sbox(deckey[28]);
+            i = 16;
+            while (i > 4) {
+                i = i - 1;
+                deckey[i] = deckey[i] ^ deckey[i - 4];
+            }
+            deckey[0] ^= sbox(deckey[29]) ^ rcon;
+            deckey[1] ^= sbox(deckey[30]);
+            deckey[2] ^= sbox(deckey[31]);
+            deckey[3] ^= sbox(deckey[28]);
         }
-        else
-        {
-	    i = 16;
-	    while (i--) buf[i] ^= deckey[i];
-	}
+        else {
+            odd = 1;
+            i = 0;
+            while (i < 16) {
+                buf[i] = buf[i] ^ deckey[i];
+                i = i + 1;
+            }
+        }
 
-	for (i=0; i<16; i+=4)
-        {
-	    a = buf[i]; 
-	    b = buf[i + 1]; 
-	    c = buf[i + 2]; 
-	    d = buf[i + 3];
-            e = a ^ b ^ c ^ d;
-    	    z = xtime(e);
-	    x = e ^ xtime(xtime(z^a^c));
-	    y = e ^ xtime(xtime(z^b^d));
-            buf[i]   ^= x ^ xtime(a^b);
-            buf[i+1] ^= y ^ xtime(b^c);
-	    buf[i+2] ^= x ^ xtime(c^d);
-	    buf[i+3] ^= y ^ xtime(d^a);
+        i = 0;
+        while (i < 16) {
+            unsigned int a = buf[i]; 
+            unsigned int b = buf[i+1]; 
+            unsigned int c = buf[i+2];
+            unsigned int d = buf[i+3];
+            unsigned int z = xtime(a ^ b ^ c ^ d);
+            unsigned int x = xtime(xtime(z^a^c));
+            unsigned int y = xtime(xtime(z^b^d));
+            buf[i]   = b ^ c ^ d ^ xtime(a^b) ^ x;
+            buf[i+1] = a ^ c ^ d ^ xtime(b^c) ^ y;
+            buf[i+2] = a ^ b ^ d ^ xtime(c^d) ^ x;
+            buf[i+3] = a ^ b ^ c ^ xtime(d^a) ^ y;
+            i = i + 4;
         }
 
 	buf[0] = invsbox(buf[0]);
@@ -487,32 +514,44 @@ void aes_decrypt_block(uint8_t *plaintext,
         i = invsbox(buf[3]);	buf[3] = invsbox(buf[7]);
 			    	buf[7] = invsbox(buf[11]);
 				buf[11] = invsbox(buf[15]);	buf[15] = i;
+
+        j = j + 1;
     }
-    i = 16;
-    while (i--) plaintext[i] = buf[i] ^ deckey[i];
+    i = 0;
+    while (i < 16) {
+        plaintext[i] = buf[i] ^ deckey[i];
+        i = i + 1;
+    }
 }
 
 
 uint64_t aes_unwrap_key(uint64_t *unwrapped_key,
-                        const uint8_t *kek,
+                        unsigned char *kek,
                         const uint64_t *wrapped_key,
                         unsigned n)
 {
-    unsigned i, jj;
     uint64_t A[2];
     uint64_t B[2];
 
     B[0] = wrapped_key[0];
-    for (i=0; i<n; i++) unwrapped_key[i] = wrapped_key[i+1];
+    unsigned int i = 0;
+    while (i < n) {
+        unwrapped_key[i] = wrapped_key[i + 1];
+        i = i + 1;
+    }
 
-    for (jj=0; jj<6; jj++) {
-        for (i=n; i!=0; i--) {
+    unsigned int jj = 0;
+    while (jj < 6) {
+        i = n;
+        while (i != 0) {
             A[0] = B[0];
-            ((uint8_t *)A)[7] ^= n*(5-jj)+i; //n*j+i;
+            ((unsigned char *)A)[7] ^= n*(5-jj)+i; //n*j+i;
             A[1] = unwrapped_key[i-1];
-            aes_decrypt_block((uint8_t *)B, kek, (uint8_t *)A);
+            aes_decrypt_block((unsigned char *)B, kek, (unsigned char *)A);
             unwrapped_key[i-1] = B[1];
+            i = i - 1;
         }
+        jj = jj + 1;
     }
     return B[0];
 }
@@ -542,17 +581,17 @@ void aes_decode_ctr(unsigned char *plaintext,
 
 
 /* layer 5: AES */
-int aes(unsigned char *dest, unsigned char *src, int slen)
+unsigned int aes(unsigned char *dest, unsigned char *src, int slen)
 {
     uint64_t key[4];
-    uint64_t iv = aes_unwrap_key(key, (uint8_t *)src, (uint64_t *)(src+40), 4);
+    uint64_t iv = aes_unwrap_key(key, src, (uint64_t *)(src+40), 4);
     if (iv != *(uint64_t *)(src+32)) return 0; /* IV not correct */
 
     int s = 96;
-    uint8_t plaintext[16];
+    unsigned char plaintext[16];
     while (s < slen) {
         aes_decode_ctr(dest+s-96,
-                       (uint8_t *)key,
+                       (unsigned char *)key,
                        src+80,
                        src+s);
         s = s + 16;
@@ -569,7 +608,7 @@ unsigned get_uint32le(unsigned char *p)
 
 
 /* layer 6: virtual machine */
-unsigned vm(unsigned char *dest, unsigned char *src, unsigned slen)
+unsigned vm(unsigned char *dest, unsigned char *src, unsigned int slen)
 {
     unsigned char reg[8];
     unsigned int regl[8];
@@ -582,8 +621,8 @@ unsigned vm(unsigned char *dest, unsigned char *src, unsigned slen)
     d = 0;
 
     while (1) {
-        unsigned opcode = src[regl[6]];
-        regl[6]++;
+        unsigned int opcode = src[regl[6]];
+        regl[6] = regl[6] + 1;
         unsigned int imm32 = get_uint32le(src + regl[6]);
         switch (opcode) {
             case 0x01: // HALT
@@ -621,10 +660,10 @@ unsigned vm(unsigned char *dest, unsigned char *src, unsigned slen)
                 unsigned int sreg = (opcode << 29) >> 29;
 
                 if (opcode < 128) { // 8 bit
-                    unsigned value = reg[sreg];
+                    unsigned int value = reg[sreg];
                     if (sreg == 0) {
                         value = src[regl[6]]; // MVI
-                        regl[6]++;
+                        regl[6] = regl[6] + 1;
                     }
                     else if (sreg == 7) {
                         value = src[regl[5] + reg[3]];
@@ -658,7 +697,7 @@ int main()
     // double buffering with 384 KiByte per buffer
     unsigned char *buf0 = malloc(3 << 17);
     unsigned char *buf1 = malloc(3 << 17);
-    unsigned len0, len1;
+    unsigned int len0, len1;
 
     len0 = input(buf0);
     len1 = asciiz85(buf1, buf0, len0);
